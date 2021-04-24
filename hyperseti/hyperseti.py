@@ -531,7 +531,7 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
     return dedopp, metadata, peaks
             
     
-def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, *args, **kwargs):
+def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1, limit=10, *args, **kwargs):
     """ Find ET, serial version
     
     Wrapper for reading from a file and running run_pipeline() on all subbands within the file.
@@ -550,16 +550,20 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, *args, **
     t0 = time.time()
     #peaks = create_empty_hits_table()    
     ds = from_h5(filename)
+    search_count = 0
     out = []
     for d_arr in ds.iterate_through_data({'frequency': gulp_size}):
+        if limit and search_count > limit:
+            break
         print(d_arr)
         d = d_arr.data
         f = d_arr.frequency
         t = d_arr.time
         md = {'fch1': f.val_start * f.units, 'df': f.val_step * f.units, 'dt': t.val_step * t.units}
-        dedopp, metadata, hits = run_pipeline(d, md, *args, **kwargs)
+        dedopp, metadata, hits = run_pipeline(d, md, max_dd, *args, **kwargs)
         out.append(hits)
         logger.info(f"{len(hits)} hits found")
+        search_count+=1
     
     dframe = pd.concat(out)
     dframe.to_csv(filename_out)
