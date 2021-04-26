@@ -7,12 +7,40 @@ from .log import logger_group, Logger
 logger = Logger('hyperseti.peak')
 logger_group.add_logger(logger)
 
-def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_peaks=cp.inf):
+prominent_peaks_kernel = cp.RawKernel(r'''
+ extern "C" __global__
+    __global__ void prominent_peaks_kernel
+        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, int num_peaks, float *intensity, int *xcoords, int *ycoords)
+        /* Each thread computes a different dedoppler sum for a given channel
+
+         * img: image, (M x N) shape
+         * M: height of img
+         * N: width of img
+         * min_xdistance: Minimum distance separating features in the x dimension.
+         * min_ydistance: Minimum distance separating features in the y dimension.
+         * threshold: Minimum intensity of peaks. Default is `0.5 * max(image)`.
+         * num_peaks: Maximum number of peaks. When the number of peaks exceeds `num_peaks`,
+         *            return `num_peaks` coordinates based on peak intensity.
+         * intensity: array of floats that hold the returned peak intensities.
+         * xcoords: returned x coordinates of peak intensities.
+         * ycoords: returned y coordinates of peak intensities.
+         */
+        {
+
+            // Setup thread index
+            const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+            const int d   = blockIdx.y;   // Dedoppler trial ID
+            const int D   = gridDim.y;   // Number of dedoppler trials
+
+        }
+ ''', 'prominent_peaks_kernel')
+
+def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=None, num_peaks=cp.inf):
     """Return peaks with non-maximum suppression.
     Identifies most prominent features separated by certain distances.
     Non-maximum suppression with different sizes is applied separately
     in the first and second dimension of the image to identify peaks.
-    
+
     Parameters
     ----------
     image : (M, N) ndarray
@@ -26,12 +54,49 @@ def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_p
     num_peaks : int
         Maximum number of peaks. When the number of peaks exceeds `num_peaks`,
         return `num_peaks` coordinates based on peak intensity.
-        
+
     Returns
     -------
     intensity, xcoords, ycoords : tuple of array
         Peak intensity values, x and y indices.
-        
+
+    Notes
+    -----
+    Modified from https://github.com/mritools/cupyimg _prominent_peaks method
+    """
+    THREADS_PER_BLOCK = (2, 2)
+    NUM_BLOCKS =  (img.shape[0] // (THREADS_PER_BLOCK[0] * min_ydistance) + (img.shape[0] % (THREADS_PER_BLOCK[0] * min_ydistance)) > 0,
+                   img.shape[1] // (THREADS_PER_BLOCK[1] * min_xdistance) + (img.shape[1] % (THREADS_PER_BLOCK[1] * min_xdistance)) > 0)
+    NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
+    intensity, xcoords, ycoords = cp.zeros(NUM_THREADS, dtype=cp.float32), cp.zeros(NUM_THREADS, dtype=cp.int32), cp.zeros(NUM_THREADS, dtype=cp.int32)
+    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (image, image.shape[0], image.shape[1], min_xdistance, min_ydistance, threshold, num_peaks, intensity, xcoords, ycoords))
+    return intensity, xcoords, ycoords
+
+def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_peaks=cp.inf):
+    """Return peaks with non-maximum suppression.
+    Identifies most prominent features separated by certain distances.
+    Non-maximum suppression with different sizes is applied separately
+    in the first and second dimension of the image to identify peaks.
+
+    Parameters
+    ----------
+    image : (M, N) ndarray
+        Input image.
+    min_xdistance : int
+        Minimum distance separating features in the x dimension.
+    min_ydistance : int
+        Minimum distance separating features in the y dimension.
+    threshold : float
+        Minimum intensity of peaks. Default is `0.5 * max(image)`.
+    num_peaks : int
+        Maximum number of peaks. When the number of peaks exceeds `num_peaks`,
+        return `num_peaks` coordinates based on peak intensity.
+
+    Returns
+    -------
+    intensity, xcoords, ycoords : tuple of array
+        Peak intensity values, x and y indices.
+
     Notes
     -----
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
@@ -45,7 +110,7 @@ def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_p
 
     ycoords_size = 2 * min_ydistance + 1
     xcoords_size = 2 * min_xdistance + 1
-    
+
     t0 = time.time()
     img_max = ndi.maximum_filter(
         img, size=(ycoords_size, xcoords_size), mode="constant", cval=0
@@ -73,7 +138,7 @@ def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_p
     coords = peak_idxs[val_sort_idx]
     te = (time.time() - t0) * 1e3
     logger.debug(f"coord search: {te:2.2f} ms")
-    
+
     t0 = time.time()
     img_peaks = []
     ycoords_peaks = []
@@ -119,14 +184,14 @@ def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_p
     xcoords_peaks = cp.array(xcoords_peaks)
     te = (time.time() - t0) * 1e3
     logger.debug(f"crazyloop: {te:2.2f} ms")
-    
+
     if num_peaks < len(img_peaks):
         idx_maxsort = cp.argsort(img_peaks)[::-1][:num_peaks]
         img_peaks = img_peaks[idx_maxsort]
         ycoords_peaks = ycoords_peaks[idx_maxsort]
         xcoords_peaks = xcoords_peaks[idx_maxsort]
-    
+
     te = (time.time() - t0) * 1e3
     logger.debug(f"prominent_peaks total: {te:2.2f} ms")
-    
+
     return img_peaks, xcoords_peaks, ycoords_peaks
