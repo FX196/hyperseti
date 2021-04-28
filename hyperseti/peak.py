@@ -1,4 +1,5 @@
 import cupy as cp
+import numpy as np
 from cupyx.scipy import ndimage as ndi
 import time
 
@@ -10,7 +11,7 @@ logger_group.add_logger(logger)
 prominent_peaks_kernel = cp.RawKernel(r'''
  extern "C" __global__
     __global__ void prominent_peaks_kernel
-        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, int num_peaks, float *intensity, int *xcoords, int *ycoords)
+        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, float *intensity, int *xcoords, int *ycoords)
         /* Each thread computes a different dedoppler sum for a given channel
 
          * img: image, (M x N) shape
@@ -26,11 +27,46 @@ prominent_peaks_kernel = cp.RawKernel(r'''
          * ycoords: returned y coordinates of peak intensities.
          */
         {
-
             // Setup thread index
-            const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-            const int d   = blockIdx.y;   // Dedoppler trial ID
-            const int D   = gridDim.y;   // Number of dedoppler trials
+            const int tx = blockIdx.x * blockDim.x + threadIdx.x;
+            const int ty = blockIdx.y * blockDim.y + threadIdx.y;
+            const int p_start_x = tx * min_xdistance;
+            const int p_start_y = ty * min_ydistance;
+            const int p_end_x = min(N, p_start_x + min_xdistance);
+            const int p_end_y = min(M, p_start_y + min_ydistance);
+
+            // Find local maximum pixel
+            float intensity_max = -1.0;
+            int x_max = -1;
+            int y_max = -1;
+            for (int y = p_start_y; y < p_end_y; ++y) {
+                for (int x = p_start_x; x < p_end_x; ++x) {
+                    // Apply threshold
+                    int idx = y * N + x;
+                    if (img[idx] > intensity_max) {
+                        intensity_max = img[idx];
+                        x_max = x;
+                        y_max = y;
+                    }
+                }
+            }
+
+            // Check if local maximum is a peak
+            int is_peak = 1;
+            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance); ++y) {
+                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance); ++x) {
+                    int idx = y * N + x;
+                    if (img[idx] >= intensity_max && (y != y_max || x != x_max))
+                        is_peak = 0;
+                }
+            }
+
+            if (is_peak && intensity_max != -1.0) {
+                int t_index = ty * blockDim.x + tx;
+                intensity[t_index] = intensity_max;
+                xcoords[t_index] = x_max;
+                ycoords[t_index] = y_max;
+            }
 
         }
  ''', 'prominent_peaks_kernel')
@@ -65,12 +101,14 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
     """
     THREADS_PER_BLOCK = (2, 2)
-    NUM_BLOCKS =  (img.shape[0] // (THREADS_PER_BLOCK[0] * min_ydistance) + (img.shape[0] % (THREADS_PER_BLOCK[0] * min_ydistance)) > 0,
-                   img.shape[1] // (THREADS_PER_BLOCK[1] * min_xdistance) + (img.shape[1] % (THREADS_PER_BLOCK[1] * min_xdistance)) > 0)
+    NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[1] * min_xdistance) + ((img.shape[1] % (THREADS_PER_BLOCK[1] * min_xdistance)) > 0),
+                   img.shape[0] // (THREADS_PER_BLOCK[0] * min_ydistance) + ((img.shape[0] % (THREADS_PER_BLOCK[0] * min_ydistance)) > 0))
     NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
-    intensity, xcoords, ycoords = cp.zeros(NUM_THREADS, dtype=cp.float32), cp.zeros(NUM_THREADS, dtype=cp.int32), cp.zeros(NUM_THREADS, dtype=cp.int32)
-    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (image, image.shape[0], image.shape[1], min_xdistance, min_ydistance, threshold, num_peaks, intensity, xcoords, ycoords))
-    return intensity, xcoords, ycoords
+    elems = (NUM_THREADS[0] * NUM_THREADS[1],)
+    intensity, xcoords, ycoords = cp.zeros(elems, dtype=cp.float32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.int32)
+    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords))
+    indices = intensity != 0.0
+    return intensity[indices], xcoords[indices], ycoords[indices]
 
 def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_peaks=cp.inf):
     """Return peaks with non-maximum suppression.
