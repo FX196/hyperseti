@@ -101,16 +101,20 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     -----
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
     """
-    THREADS_PER_BLOCK = (1, 16)
+    THREADS_PER_BLOCK = (4, 1)
     # Each thread is responsible for a (min_ydistance * min_xdistance) patch
-    # THREADS_PER_BLOCK is in the order of (x, y), but img.shape is in the order of (y, x)
-    NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + int((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance)) > 0),
-                   img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + int((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance)) > 0))
+    # THREADS_PER_BLOCK and img.shape are in the order of (y, x)
+    print("x", int((img.shape[1] % (THREADS_PER_BLOCK[1] * min_xdistance) > 0)))
+    print("y", int((img.shape[0] % (THREADS_PER_BLOCK[0] * min_ydistance) > 0)))
+    NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + int((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance) > 0)),
+                   img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + int((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance) > 0)))
+    print("NUM BLOCKS", NUM_BLOCKS)
     NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
     elems = (NUM_THREADS[0] * NUM_THREADS[1],)
     buf = cp.zeros(img.shape, dtype=cp.float32)
     intensity, xcoords, ycoords = cp.zeros(elems, dtype=cp.float32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.int32)
     prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords, buf))
+    cp.cuda.Stream.null.synchronize()
     indices = intensity != 0.0
     logger.info(np.sum(buf != 1))
     return intensity[indices], xcoords[indices], ycoords[indices]
