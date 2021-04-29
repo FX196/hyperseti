@@ -11,7 +11,7 @@ logger_group.add_logger(logger)
 prominent_peaks_kernel = cp.RawKernel(r'''
  extern "C" __global__
     __global__ void prominent_peaks_kernel
-        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, float *intensity, int *xcoords, int *ycoords)
+        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, float *intensity, int *xcoords, int *ycoords, float* buf)
         /* Each thread computes a different dedoppler sum for a given channel
 
          * img: image, (M x N) shape
@@ -43,6 +43,7 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                 for (int x = p_start_x; x < p_end_x; ++x) {
                     // Apply threshold
                     int idx = y * N + x;
+                    buf[idx] = 1;
                     if (img[idx] > intensity_max) {
                         intensity_max = img[idx];
                         x_max = x;
@@ -53,8 +54,8 @@ prominent_peaks_kernel = cp.RawKernel(r'''
 
             // Check if local maximum is a peak
             int is_peak = 1;
-            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance); ++y) {
-                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance); ++x) {
+            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance + 1); ++y) {
+                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance + 1); ++x) {
                     int idx = y * N + x;
                     if (img[idx] >= intensity_max && (y != y_max || x != x_max))
                         is_peak = 0;
@@ -100,16 +101,18 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     -----
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
     """
-    THREADS_PER_BLOCK = (2, 2)
+    THREADS_PER_BLOCK = (1, 16)
     # Each thread is responsible for a (min_ydistance * min_xdistance) patch
     # THREADS_PER_BLOCK is in the order of (x, y), but img.shape is in the order of (y, x)
-    NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + ((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance)) > 0),
-                   img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + ((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance)) > 0))
+    NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + int((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance)) > 0),
+                   img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + int((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance)) > 0))
     NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
     elems = (NUM_THREADS[0] * NUM_THREADS[1],)
+    buf = cp.zeros(img.shape, dtype=cp.float32)
     intensity, xcoords, ycoords = cp.zeros(elems, dtype=cp.float32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.int32)
-    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords))
+    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords, buf))
     indices = intensity != 0.0
+    logger.info(np.sum(buf != 1))
     return intensity[indices], xcoords[indices], ycoords[indices]
 
 def prominent_peaks(img, min_xdistance=1, min_ydistance=1, threshold=None, num_peaks=cp.inf):
