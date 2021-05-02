@@ -11,7 +11,7 @@ logger_group.add_logger(logger)
 prominent_peaks_kernel = cp.RawKernel(r'''
  extern "C" __global__
     __global__ void prominent_peaks_kernel
-        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, float *intensity, int *xcoords, int *ycoords)
+        (const float *img, int M, int N, int min_xdistance, int min_ydistance, float threshold, float *intensity, int *xcoords, int *ycoords, float *max_intensity)
         /* Each thread computes a different dedoppler sum for a given channel
 
          * img: image, (M x N) shape
@@ -49,11 +49,67 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                         x_max = x;
                         y_max = y;
                     }
+                    if (y == p_start_y) {
+                        max_intensity[idx] = img[idx];
+                    } else {
+                        max_intensity[idx] = img[idx] + max_intensity[(y-1) * N + x];
+                    }
+                }
+            }
+            
+            // Barrier, because the next part depends on the previous part
+            __syncthreads();
+
+            // Check if local maximum is a peak. Max's are non-inclusive
+            int peak_check_max_y = min(N, y_max + min_ydistance + 1);
+            int peak_check_min_x = max(0, x_max - min_xdistance);
+            int peak_check_max_x = min(N, x_max + min_xdistance + 1);
+            int is_peak = 1;
+
+            // Check elements in the blocks below
+            if (blockIdx.y < gridDim.y - 1) { // If there are blocks below
+                for (int x = peak_check_min_x; x < peak_check_max_x; x++) {
+                    int idx = (peak_check_max_y - 1) * N + x;
+                    if (max_intensity[idx] >= intensity_max) {
+                        is_peak = 0;
+                        break;
+                    }
                 }
             }
 
-            // Check if local maximum is a peak
-            int is_peak = 1;
+            // Check elements in the blocks above
+            if (is_peak && blockIdx.y > 0) {
+                for (int x = peak_check_min_x; x < peak_check_max_x; x++) {
+                    int idx = (p_start_x - 1) * N + x;
+                    if (max_intensity[idx] >= intensity_max) {
+                        is_peak = 0;
+                        break;
+                    }
+                }
+            }
+
+            // Check elements in the left block
+            if (is_peak && blockIdx.x > 0) {
+                for (int x = peak_check_min_x; x < p_start_x; x++) {
+                    int idx = (p_end_y - 1) * N + x;
+                    if (max_intensity[idx] >= intensity_max) {
+                        is_peak = 0;
+                        break;
+                    }
+                }
+            }
+
+            // Check elements in the right block
+            if (is_peak && blockIdx.x < gridDim.x - 1) {
+                for (int x = p_end_x + 1; x < peak_check_max_x; x++) {
+                    int idx = (p_end_y - 1) * N + x;
+                    if (max_intensity[idx] >= intensity_max) {
+                        is_peak = 0;
+                        break;
+                    }
+                }
+            }
+            
             for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance + 1); ++y) {
                 for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance + 1); ++x) {
                     int idx = y * N + x;
@@ -108,8 +164,8 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
                    img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + int((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance) > 0)))
     NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
     elems = (NUM_THREADS[0] * NUM_THREADS[1],)
-    intensity, xcoords, ycoords = cp.zeros(elems, dtype=cp.float32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.int32)
-    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords))
+    intensity, xcoords, ycoords, max_intensity = cp.zeros(elems, dtype=cp.float32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.float32)
+    prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords, max_intensity))
     indices = intensity != 0.0
     return intensity[indices], xcoords[indices], ycoords[indices]
 
