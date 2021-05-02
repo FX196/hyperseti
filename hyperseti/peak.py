@@ -55,6 +55,7 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                     if (y == p_start_y) {
                         max_intensity[idx] = img[idx];
                     } else {
+                        assert(idx - N >= 0);
                         max_intensity[idx] = img[idx] + max_intensity[idx - N];
                     }
                 }
@@ -71,6 +72,7 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                     if (y == p_end_y - 1) {
                         max_intensity[idx] = img[idx];
                     } else {
+                        assert(idx + N < N * M);
                         max_intensity[idx] = img[idx] + max_intensity[idx + N];
                     }
                 }
@@ -97,14 +99,16 @@ prominent_peaks_kernel = cp.RawKernel(r'''
 
             // Check if local maximum is a peak. Max's are non-inclusive
             int peak_check_min_y = max(0, y_max - min_ydistance);
-            int peak_check_max_y = min(N, y_max + min_ydistance + 1);
+            int peak_check_max_y = min(M, y_max + min_ydistance + 1);
             int peak_check_min_x = max(0, x_max - min_xdistance);
             int peak_check_max_x = min(N, x_max + min_xdistance + 1);
             int is_peak = 1;
 
             // Check elements in the blocks below
-            if (blockIdx.y < gridDim.y - 1) { // If there are blocks below
-                int mid_y_below = p_mid_y + min_ydistance;
+            if (ty < gridDim.y * blockDim.y - 1) { // If there are blocks below
+                int start_y_below = p_end_y;
+                int end_y_below = min(M, start_y_below + min_ydistance);
+                int mid_y_below = (start_y_below + end_y_below) / 2;
                 if (peak_check_max_y - 1 >= mid_y_below) {
                     // Check against the aggregated max
                     for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
@@ -117,7 +121,7 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                     // Tail case
                     for (int y = mid_y_below; y < peak_check_max_y; ++y) {
                         for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
-                            if (max_intensity[y * N + x] >= intensity_max) {
+                            if (img[y * N + x] >= intensity_max) {
                                 is_peak = 0;
                                 break;
                             }
@@ -136,8 +140,10 @@ prominent_peaks_kernel = cp.RawKernel(r'''
             }
 
             // Check elements in the blocks above
-            if (is_peak && blockIdx.y > 0) {
-                int mid_y_above = p_mid_y - min_ydistance;
+            if (is_peak && ty > 0) {
+                int end_y_above = p_start_y;
+                int start_y_above = max(end_y_above - min_ydistance, 0);
+                int mid_y_above = (start_y_above + end_y_above) / 2;
                 if (peak_check_min_y < mid_y_above) {
                     // Check against the aggregated max
                     for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
@@ -150,7 +156,7 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                     // Tail case
                     for (int y = peak_check_min_y; y < mid_y_above; ++y) {
                         for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
-                            if (max_intensity[y * N + x] >= intensity_max) {
+                            if (img[y * N + x] >= intensity_max) {
                                 is_peak = 0;
                                 break;
                             }
@@ -166,39 +172,8 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                         }
                     }
                 }
-                for (int x = peak_check_min_x; x < peak_check_max_x; x++) {
-                    int idx = (p_start_y - 1) * N + x;
-                    if (max_intensity[idx] >= intensity_max) {
-                        is_peak = 0;
-                        break;
-                    }
-                }
             }
 
-            // Check elements in the left block
-            if (is_peak && blockIdx.x > 0) {
-                for (int x = peak_check_min_x; x < p_start_x; x++) {
-                    float top_max = max_intensity[(p_mid_y - 1) * N + x]; // Aggregated sum from top
-                    float bottom_max = max_intensity[p_mid_y * N + x];
-                    if (top_max >= intensity_max || bottom_max >= intensity_max) {
-                        is_peak = 0;
-                        break;
-                    }
-                }
-            }
-
-            // Check elements in the right block
-            if (is_peak && blockIdx.x < gridDim.x - 1) {
-                for (int x = p_end_x; x < peak_check_max_x; x++) {
-                    float top_max = max_intensity[(p_mid_y - 1) * N + x]; // Aggregated sum from top
-                    float bottom_max = max_intensity[p_mid_y * N + x];
-                    if (top_max >= intensity_max || bottom_max >= intensity_max) {
-                        is_peak = 0;
-                        break;
-                    }
-                }
-            }
-            
             if (is_peak && intensity_max != -1.0) {
                 int t_index = ty * blockDim.x * gridDim.x + tx;
                 intensity[t_index] = intensity_max;
