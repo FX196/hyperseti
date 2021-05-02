@@ -54,10 +54,16 @@ prominent_peaks_kernel = cp.RawKernel(r'''
 
             // Check if local maximum is a peak
             int is_peak = 1;
-            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance + 1); ++y) {
-                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance + 1); ++x) {
+            int peak_find_y_min = max(0, y_max - min_ydistance);
+            int peak_find_y_max = min(M, y_max + min_ydistance + 1);
+            int peak_find_x_min = max(0, x_max - min_xdistance);
+            int peak_find_x_max = min(N, x_max + min_xdistance + 1);
+            for (int y = peak_find_y_min; y < peak_find_y_max; ++y) {
+                for (int x = peak_find_x_min; x < peak_find_x_max; ++x) {
+                    if (y >= p_start_y && y < p_end_y && x >= p_start_x && x < p_end_x)
+                       continue;
                     int idx = y * N + x;
-                    if (img[idx] >= intensity_max && (y != y_max || x != x_max))
+                    if (img[idx] > intensity_max && (y != y_max || x != x_max))
                         is_peak = 0;
                 }
             }
@@ -101,7 +107,7 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     -----
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
     """
-    THREADS_PER_BLOCK = (32, 1)
+    THREADS_PER_BLOCK = (8, 1)
     # Each thread is responsible for a (min_ydistance * min_xdistance) patch
     # THREADS_PER_BLOCK and img.shape are in the order of (y, x)
     NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + int((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance) > 0)),
