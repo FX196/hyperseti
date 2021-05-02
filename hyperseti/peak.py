@@ -36,7 +36,8 @@ prominent_peaks_kernel = cp.RawKernel(r'''
             const int p_end_x = min(N, p_start_x + min_xdistance);
             const int p_end_y = min(M, p_start_y + min_ydistance);
             const int p_mid_y = (p_start_y + p_end_y) / 2;
-            assert(p_mid_y > p_start_y && p_mid_y < p_end_y - 1);
+            if (ty != gridDim.y - 1)
+                assert(p_mid_y > p_start_y && p_mid_y < p_end_y - 1);
 
             // Find local maximum pixel
             float intensity_max = -1.0;
@@ -204,7 +205,6 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                 xcoords[t_index] = x_max;
                 ycoords[t_index] = y_max;
             }
-
         }
  ''', 'prominent_peaks_kernel')
 
@@ -241,7 +241,6 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     # min_xdistance, min_ydistance = 2, 2
     # Each thread is responsible for a (min_ydistance * min_xdistance) patch
     # THREADS_PER_BLOCK and img.shape are in the order of (y, x）
-    print(min_xdistance, min_ydistance)
     NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + int((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance) > 0)),
                    img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + int((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance) > 0)))
     NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
