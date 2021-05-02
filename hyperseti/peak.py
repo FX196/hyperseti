@@ -35,12 +35,14 @@ prominent_peaks_kernel = cp.RawKernel(r'''
             const int p_start_y = ty * min_ydistance;
             const int p_end_x = min(N, p_start_x + min_xdistance);
             const int p_end_y = min(M, p_start_y + min_ydistance);
+            const int p_mid_y = (p_start_y + p_end_y) / 2;
+            assert(p_mid_y > p_start_y && p_mid_y < p_end_y - 1);
 
             // Find local maximum pixel
             float intensity_max = -1.0;
             int x_max = -1;
             int y_max = -1;
-            for (int y = p_start_y; y < p_end_y; ++y) {
+            for (int y = p_start_y; y < p_mid_y; ++y) {
                 for (int x = p_start_x; x < p_end_x; ++x) {
                     // Apply threshold
                     int idx = y * N + x;
@@ -52,15 +54,48 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                     if (y == p_start_y) {
                         max_intensity[idx] = img[idx];
                     } else {
-                        max_intensity[idx] = img[idx] + max_intensity[(y-1) * N + x];
+                        max_intensity[idx] = img[idx] + max_intensity[idx - N];
                     }
                 }
-            }
+            }  
+            for (int y = p_end_y - 1; y >= p_mid_y; --y) {
+                for (int x = p_start_x; x < p_end_x; ++x) {
+                    // Apply threshold
+                    int idx = y * N + x;
+                    if (img[idx] > intensity_max) {
+                        intensity_max = img[idx];
+                        x_max = x;
+                        y_max = y;
+                    }
+                    if (y == p_end_y - 1) {
+                        max_intensity[idx] = img[idx];
+                    } else {
+                        max_intensity[idx] = img[idx] + max_intensity[idx + N];
+                    }
+                }
+            } 
+
+            // if (tx == 0 && ty == 0) {
+            //     for (int y = p_start_y; y < p_end_y; ++y) {
+            //         for (int x = p_start_x; x < p_end_x; ++x) {
+            //             printf("%f ", img[y * N + x]);
+            //         }
+            //         printf("\n");
+            //     }
+            //     printf("\n");
+            //     for (int y = p_start_y; y < p_end_y; ++y) {
+            //         for (int x = p_start_x; x < p_end_x; ++x) {
+            //             printf("%f ", max_intensity[y * N + x]);
+            //         }
+            //         printf("\n");
+            //     }
+            // }
             
             // Barrier, because the next part depends on the previous part
             __syncthreads();
 
             // Check if local maximum is a peak. Max's are non-inclusive
+            int peak_check_min_y = max(0, y_max - min_ydistance);
             int peak_check_max_y = min(N, y_max + min_ydistance + 1);
             int peak_check_min_x = max(0, x_max - min_xdistance);
             int peak_check_max_x = min(N, x_max + min_xdistance + 1);
@@ -68,19 +103,70 @@ prominent_peaks_kernel = cp.RawKernel(r'''
 
             // Check elements in the blocks below
             if (blockIdx.y < gridDim.y - 1) { // If there are blocks below
-                for (int x = peak_check_min_x; x < peak_check_max_x; x++) {
-                    int idx = (peak_check_max_y - 1) * N + x;
-                    if (max_intensity[idx] >= intensity_max) {
-                        is_peak = 0;
-                        break;
+                int mid_y_below = p_mid_y + min_ydistance;
+                if (peak_check_max_y - 1 >= mid_y_below) {
+                    // Check against the aggregated max
+                    for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
+                        int idx = (mid_y_below - 1) * N + x;
+                        if (max_intensity[idx] >= intensity_max) {
+                            is_peak = 0;
+                            break;
+                        }
+                    }
+                    // Tail case
+                    for (int y = mid_y_below; y < peak_check_max_y; ++y) {
+                        for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
+                            if (max_intensity[y * N + x] >= intensity_max) {
+                                is_peak = 0;
+                                break;
+                            }
+                        } 
+                    }
+                } else {
+                    // Check against aggregated max
+                    for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
+                        int idx = (peak_check_max_y - 1) * N + x;
+                        if (max_intensity[idx] >= intensity_max) {
+                            is_peak = 0;
+                            break;
+                        }
                     }
                 }
             }
 
             // Check elements in the blocks above
             if (is_peak && blockIdx.y > 0) {
+                int mid_y_above = p_mid_y - min_ydistance;
+                if (peak_check_min_y < mid_y_above) {
+                    // Check against the aggregated max
+                    for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
+                        int idx = mid_y_above * N + x;
+                        if (max_intensity[idx] >= intensity_max) {
+                            is_peak = 0;
+                            break;
+                        }
+                    }
+                    // Tail case
+                    for (int y = peak_check_min_y; y < mid_y_above; ++y) {
+                        for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
+                            if (max_intensity[y * N + x] >= intensity_max) {
+                                is_peak = 0;
+                                break;
+                            }
+                        } 
+                    }
+                } else {
+                    // Check against aggregated max
+                    for (int x = peak_check_min_x; x < peak_check_max_x; ++x) {
+                        int idx = peak_check_min_y * N + x;
+                        if (max_intensity[idx] >= intensity_max) {
+                            is_peak = 0;
+                            break;
+                        }
+                    }
+                }
                 for (int x = peak_check_min_x; x < peak_check_max_x; x++) {
-                    int idx = (p_start_x - 1) * N + x;
+                    int idx = (p_start_y - 1) * N + x;
                     if (max_intensity[idx] >= intensity_max) {
                         is_peak = 0;
                         break;
@@ -91,8 +177,9 @@ prominent_peaks_kernel = cp.RawKernel(r'''
             // Check elements in the left block
             if (is_peak && blockIdx.x > 0) {
                 for (int x = peak_check_min_x; x < p_start_x; x++) {
-                    int idx = (p_end_y - 1) * N + x;
-                    if (max_intensity[idx] >= intensity_max) {
+                    float top_max = max_intensity[(p_mid_y - 1) * N + x]; // Aggregated sum from top
+                    float bottom_max = max_intensity[p_mid_y * N + x];
+                    if (top_max >= intensity_max || bottom_max >= intensity_max) {
                         is_peak = 0;
                         break;
                     }
@@ -101,23 +188,16 @@ prominent_peaks_kernel = cp.RawKernel(r'''
 
             // Check elements in the right block
             if (is_peak && blockIdx.x < gridDim.x - 1) {
-                for (int x = p_end_x + 1; x < peak_check_max_x; x++) {
-                    int idx = (p_end_y - 1) * N + x;
-                    if (max_intensity[idx] >= intensity_max) {
+                for (int x = p_end_x; x < peak_check_max_x; x++) {
+                    float top_max = max_intensity[(p_mid_y - 1) * N + x]; // Aggregated sum from top
+                    float bottom_max = max_intensity[p_mid_y * N + x];
+                    if (top_max >= intensity_max || bottom_max >= intensity_max) {
                         is_peak = 0;
                         break;
                     }
                 }
             }
             
-            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance + 1); ++y) {
-                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance + 1); ++x) {
-                    int idx = y * N + x;
-                    if (img[idx] >= intensity_max && (y != y_max || x != x_max))
-                        is_peak = 0;
-                }
-            }
-
             if (is_peak && intensity_max != -1.0) {
                 int t_index = ty * blockDim.x * gridDim.x + tx;
                 intensity[t_index] = intensity_max;
@@ -158,14 +238,17 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
     """
     THREADS_PER_BLOCK = (32, 1)
+    # min_xdistance, min_ydistance = 2, 2
     # Each thread is responsible for a (min_ydistance * min_xdistance) patch
-    # THREADS_PER_BLOCK and img.shape are in the order of (y, x)
+    # THREADS_PER_BLOCK and img.shape are in the order of (y, x）
+    print(min_xdistance, min_ydistance)
     NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + int((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance) > 0)),
                    img.shape[0] // (THREADS_PER_BLOCK[1] * min_ydistance) + int((img.shape[0] % (THREADS_PER_BLOCK[1] * min_ydistance) > 0)))
     NUM_THREADS = np.multiply(THREADS_PER_BLOCK, NUM_BLOCKS)
     elems = (NUM_THREADS[0] * NUM_THREADS[1],)
     intensity, xcoords, ycoords, max_intensity = cp.zeros(elems, dtype=cp.float32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.int32), cp.zeros(elems, dtype=cp.float32)
     prominent_peaks_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (img, cp.int32(img.shape[0]), cp.int32(img.shape[1]), cp.int32(min_xdistance), cp.int32(min_ydistance), cp.float32(threshold), intensity, xcoords, ycoords, max_intensity))
+    cp.cuda.Stream.null.synchronize()
     indices = intensity != 0.0
     return intensity[indices], xcoords[indices], ycoords[indices]
 
