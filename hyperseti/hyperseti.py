@@ -21,9 +21,12 @@ from multiprocessing.pool import ThreadPool
 import dask
 import dask.bag as db
 from dask.diagnostics import ProgressBar
+import matplotlib.pyplot as plt
 
 #logging
 from .log import logger_group, Logger
+from .plotting import imshow_dedopp, imshow_waterfall, overlay_hits
+
 logger = Logger('hyperseti.hyperseti')
 logger_group.add_logger(logger)
 
@@ -371,7 +374,7 @@ def create_empty_hits_table():
     return hits
 
 
-def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=None):
+def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=None, plot=False):
     """ Search for hits using _prominent_peaks method in cupyimg.skimage
 
     Args:
@@ -404,6 +407,8 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
 
     t0 = time.time()
     intensity, fcoords, dcoords = prominent_peaks_optimized(dedopp_gpu, min_xdistance=min_fdistance, min_ydistance=min_ddistance, threshold=threshold)
+    logger.debug("# of intensities:{}".format(len(intensity)))
+
     t1 = time.time()
     logger.info(f"Peak find time: {(t1-t0)*1e3:2.2f}ms")
     t0 = time.time()
@@ -470,7 +475,7 @@ def merge_hits(hitlist):
         hits.append(tophit)
     t1 = time.time()
     logger.info(f"Hit merging time: {(t1-t0)*1e3:2.2f}ms")
-    
+
     return pd.DataFrame(hits)
 
 
@@ -513,12 +518,26 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
         logger.info(f"--- Boxcar size: {boxcar_size} ---")
         dedopp, metadata = dedoppler(data, metadata, boxcar_size=boxcar_size,  boxcar_mode='sum',
                                      max_dd=max_dd, min_dd=min_dd, return_space='gpu')
-        
+
+        # Plotting original + dedop
+        if plot:
+            logger.info("Plotting {}".format(boxcar_size))
+            plt.figure(figsize=(20, 4))
+            plt.subplot(1,2,1)
+            imshow_waterfall(data[:,0,:], metadata, 'channel', 'timestep')
+            plt.subplot(1,2,2)
+            imshow_dedopp(dedopp, metadata, 'channel', 'driftrate')
+
         # Adjust SNR threshold to take into account boxcar size and dedoppler sum
         # Noise increases by sqrt(N_timesteps * boxcar_size)
         _threshold = threshold * np.sqrt(N_timesteps * boxcar_size)
         _peaks = hitsearch(dedopp, metadata, threshold=_threshold, min_fdistance=min_fdistance, min_ddistance=min_ddistance)
-        
+
+        # Plotting hits
+        if plot:
+            overlay_hits(_peaks, 'channel', 'driftrate')
+            plt.savefig(f'boxcar: {boxcar_size}.png')
+
         if _peaks is not None:
             _peaks['snr'] /= np.sqrt(N_timesteps * boxcar_size)
             peaks = pd.concat((peaks, _peaks), ignore_index=True)
