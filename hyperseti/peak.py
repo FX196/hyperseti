@@ -53,8 +53,8 @@ prominent_peaks_kernel = cp.RawKernel(r'''
 
             // Check if local maximum is a peak
             int is_peak = 1;
-            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance); ++y) {
-                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance); ++x) {
+            for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance + 1); ++y) {
+                for (int x = max(0, x_max - min_xdistance); x < min(N, x_max + min_xdistance + 1); ++x) {
                     int idx = y * N + x;
                     if (img[idx] >= intensity_max && (y != y_max || x != x_max))
                         is_peak = 0;
