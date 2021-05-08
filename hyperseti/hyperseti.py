@@ -10,7 +10,7 @@ import setigen as stg
 
 from cupyx.scipy.ndimage import uniform_filter1d
 
-from .peak import prominent_peaks
+from .peak import prominent_peaks, prominent_peaks_optimized
 from .data import from_fil, from_h5
 
 import hdf5plugin
@@ -403,7 +403,7 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
     dedopp_gpu = cp.asarray(dedopp.astype('float32', copy=False))
 
     t0 = time.time()
-    intensity, fcoords, dcoords = prominent_peaks(dedopp_gpu, min_xdistance=min_fdistance, min_ydistance=min_ddistance, threshold=threshold)
+    intensity, fcoords, dcoords = prominent_peaks_optimized(dedopp_gpu, min_xdistance=min_fdistance, min_ydistance=min_ddistance, threshold=threshold)
     t1 = time.time()
     logger.info(f"Peak find time: {(t1-t0)*1e3:2.2f}ms")
     t0 = time.time()
