@@ -374,7 +374,7 @@ def create_empty_hits_table():
     return hits
 
 
-def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=None, plot=False):
+def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=None):
     """ Search for hits using _prominent_peaks method in cupyimg.skimage
 
     Args:
@@ -480,7 +480,7 @@ def merge_hits(hitlist):
 
 
 def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistance=None,
-                 min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False):
+                 min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False, plot=True):
     """ Run dedoppler + hitsearch pipeline
 
     Args:
@@ -495,6 +495,7 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
         threshold (float): Threshold value (absolute) above which a peak can be considered
         min_fdistance (int): Minimum distance in pixels to nearest peak along frequency axis
         min_ddistance (int): Minimum distance in pixels to nearest peak along doppler axis
+        plot (bool): Whether to plot results
 
     Returns:
         (dedopp, metadata, peaks): Array of data post dedoppler (at final boxcar width), plus
