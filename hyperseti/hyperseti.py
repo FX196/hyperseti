@@ -468,11 +468,10 @@ def merge_hits(hitlist):
                 abs(channel_idx - {p0['channel_idx']}) <= boxcar_size + 1)"""
         q = q.replace('\n', '') # Query must be one line
         pq = p.query(q)
-        tophit = pq.sort_values("snr", ascending=False).iloc[0]
 
         # Drop all matched rows
         p = p.drop(pq.index)
-        hits.append(tophit)
+        hits.append(p0)
     t1 = time.time()
     logger.info(f"Hit merging time: {(t1-t0)*1e3:2.2f}ms")
 
