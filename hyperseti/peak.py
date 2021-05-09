@@ -62,7 +62,7 @@ prominent_peaks_kernel = cp.RawKernel(r'''
             }
 
             if (is_peak && intensity_max != -1.0) {
-                int t_index = ty * blockDim.x + tx;
+                int t_index = ty * blockDim.x * gridDim.x + tx;
                 intensity[t_index] = intensity_max;
                 xcoords[t_index] = x_max;
                 ycoords[t_index] = y_max;
@@ -100,7 +100,7 @@ def prominent_peaks_optimized(img, min_xdistance=1, min_ydistance=1, threshold=N
     -----
     Modified from https://github.com/mritools/cupyimg _prominent_peaks method
     """
-    THREADS_PER_BLOCK = (2, 2)
+    THREADS_PER_BLOCK = (32, 1)
     # Each thread is responsible for a (min_ydistance * min_xdistance) patch
     # THREADS_PER_BLOCK is in the order of (x, y), but img.shape is in the order of (y, x)
     NUM_BLOCKS =  (img.shape[1] // (THREADS_PER_BLOCK[0] * min_xdistance) + ((img.shape[1] % (THREADS_PER_BLOCK[0] * min_xdistance)) > 0),
