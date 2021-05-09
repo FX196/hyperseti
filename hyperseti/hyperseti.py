@@ -10,7 +10,7 @@ import setigen as stg
 
 from cupyx.scipy.ndimage import uniform_filter1d
 
-from .peak import prominent_peaks
+from .peak import prominent_peaks_optimized as prominent_peaks
 from .data import from_fil, from_h5
 
 import hdf5plugin
@@ -18,6 +18,7 @@ import h5py
 from copy import deepcopy
 
 from multiprocessing.pool import ThreadPool
+from multiprocessing import Pool
 import dask
 import dask.bag as db
 from dask.diagnostics import ProgressBar
@@ -110,6 +111,52 @@ extern "C" __global__
             }
         }
 ''', 'dedopplerKurtosisKernel')
+
+suppression_kernel = cp.RawKernel(r'''
+extern "C" __global__
+    __global__ void suppressionKernel
+        (const float* snrs, const int* drifts, const int* channels, const int* sizes, const int* start, const int* end, bool* save, float* debug)
+        /* 
+        */
+        {
+        
+        // Setup thread index
+        const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+        
+        
+        const int start_idx = start[tid];
+        const int end_idx = end[tid];
+        
+        
+        for(int idx = start_idx; idx < end_idx; idx++){
+            if(save[idx]){
+                int boxcar_size = sizes[idx];
+                int end_channel = channels[idx] + boxcar_size + 1;
+                int start_channel = channels[idx] - boxcar_size - 1;
+                int min_drift = drifts[idx] - boxcar_size - 1;
+                int max_drift = drifts[idx] + boxcar_size + 1;
+                float snr = snrs[idx];
+                debug[idx] = snrs[idx];
+                
+                int curr_idx = idx+1;
+                while(curr_idx < end_idx && channels[curr_idx] <= end_channel){
+                    if((drifts[curr_idx] >= min_drift) && (drifts[curr_idx] <= max_drift) && (snrs[curr_idx] < snr)){
+                        save[curr_idx] = false;
+                    }
+                    curr_idx+=1;
+                }
+                curr_idx = idx-1;
+                while(curr_idx >= start_idx && channels[curr_idx] >= start_channel){
+                    if((drifts[curr_idx] >= min_drift) && (drifts[curr_idx] <= max_drift) && (snrs[curr_idx] < snr)){
+                        save[curr_idx] = false;
+                    }
+                    curr_idx-=1;
+                }
+            }
+        }
+        }
+        
+''', 'suppressionKernel')
 
 
 def normalize(data, mask=None, padding=0, return_space='cpu'):
@@ -438,8 +485,56 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
     else:
         return None
     
+# def populate_domain(hitlist, domain_shape=None):
+#     hitlist = hitlist.sort_values("driftrate_idx", ascending=True)
+#     split_arr = hitlist["channel_idx"]
+#     splitter = np.expand_dims(np.arange(32) * (2**8), axis=0)
+#     x = np.expand_dims(np.array(split_arr), axis=1)
+#     inds = ((x > splitter-32) * (x < (splitter + (2**8)+32)))
+#     sub_lists = [hitlist[sub_inds] for sub_inds in inds.T]
     
-def merge_hits(hitlist):
+#     snr_gpu = cp.zeros(domain_shape, cp.float32)
+#     size_gpu = cp.zeros(domain_shape, cp.int8)
+    
+#     for row in hitlist:
+        
+        
+    
+def merge_hits_gpu(hitlist, domain_shape):
+    n_drift, n_chan = domain_shape
+    F_block = min(n_chan, 2**8)
+    n_threads = n_chan // F_block
+    
+    
+    hitlist = hitlist.sort_values("channel_idx", ascending=True)
+    split_arr = hitlist["channel_idx"]
+    splitter = np.expand_dims(np.arange(n_threads) * F_block, axis=0)
+    x = np.expand_dims(np.array(split_arr), axis=1)
+    inds = ((x > splitter - 64) * (x < (splitter + F_block + 64)))
+    selector = (((np.repeat(np.expand_dims(np.arange(len(hitlist)), axis=1), n_threads, axis=1))) * inds)
+    
+    ends = np.argmax(selector, axis=0)+1
+    selector[inds != True] += len(hitlist)
+    starts = np.argmin(selector, axis=0)
+    
+    snrs = cp.array(hitlist["snr"], dtype=cp.float32)
+    drifts = cp.array(hitlist["driftrate_idx"], dtype=cp.int32)
+    channels = cp.array(hitlist["channel_idx"], dtype=cp.int32)
+    sizes = cp.array(hitlist["boxcar_size"], dtype=cp.int32)
+    starts = cp.array(starts, dtype=cp.int32)
+    ends = cp.array(ends, dtype=cp.int32)
+    save = cp.full((len(hitlist),), True, dtype=cp.bool)
+    debug = cp.zeros(len(hitlist), dtype=cp.float32)
+    
+    NUM_BLOCKS = (1,)
+    THREADS_PER_BLOCK = (n_threads,)
+    
+    suppression_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
+    
+    return hitlist[save.get()]
+    
+    
+def merge_hits_orig(hitlist, domain_shape=None):
     """ Group hits corresponding to different boxcar widths and return hit with max SNR 
     
     Args:
@@ -448,7 +543,6 @@ def merge_hits(hitlist):
     Returns:
         hitlist (pd.DataFrame): Abridged list of hits after merging
     """
-    t0 = time.time()
     p = hitlist.sort_values('snr', ascending=False)
     hits = []
     while len(p) > 1:
@@ -463,16 +557,29 @@ def merge_hits(hitlist):
                 abs(channel_idx - {p0['channel_idx']}) <= boxcar_size + 1)"""
         q = q.replace('\n', '') # Query must be one line
         pq = p.query(q)
-        tophit = pq.sort_values("snr", ascending=False).iloc[0]
+#         tophit = pq.sort_values("snr", ascending=False).iloc[0]
 
         # Drop all matched rows
         p = p.drop(pq.index)
-        hits.append(tophit)
-    t1 = time.time()
-    logger.info(f"Hit merging time: {(t1-t0)*1e3:2.2f}ms")
+        hits.append(p0)
     
     return pd.DataFrame(hits)
+    
+    
+def merge_hits_cpu(hitlist, domain_shape=None):
+    NUM_CORES = 32
+    block_size = int(domain_shape[1] / NUM_CORES)
+    split_arr = hitlist["channel_idx"]
+    
+    splitter = np.expand_dims(np.arange(NUM_CORES) * block_size, axis=0)
+    x = np.expand_dims(np.array(split_arr), axis=1)
+    inds = ((x > splitter - 64) * (x < (splitter + block_size + 32)))
+    sub_lists = [hitlist[sub_inds] for sub_inds in inds.T]
+    with Pool(NUM_CORES) as p:
+        results = p.map(merge_hits_orig, sub_lists)
+    return pd.concat(results).drop_duplicates()
 
+merge_hits = merge_hits_gpu
 
 def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistance=None, 
                  min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False):
@@ -524,7 +631,10 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
             peaks = pd.concat((peaks, _peaks), ignore_index=True)
             
     if merge_boxcar_trials:
-        peaks = merge_hits(peaks)
+        t0_merge = time.time()
+        peaks = merge_hits(peaks, domain_shape=dedopp.shape)
+        t1_merge = time.time()
+        logger.info(f"Hit merging time: {(t1_merge-t0_merge)*1e3:2.2f}ms")
     t1 = time.time()
     
     logger.info(f"Pipeline runtime: {(t1-t0):2.2f}s")
@@ -553,7 +663,7 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
     search_count = 0
     out = []
     for d_arr in ds.iterate_through_data({'frequency': gulp_size}):
-        if limit and search_count > limit:
+        if limit and search_count >= limit:
             break
         print(d_arr)
         d = d_arr.data
