@@ -135,10 +135,12 @@ class DataArray(object):
             d_h5.isel({'frequency': slice(0, 4096), 'time': slice(0, 10)})
             
         """
+        print("sel", sel)
         slices = []
         new_scales = {}
         for idx, dim_id in enumerate(self.dims):
             sl = sel.get(dim_id, slice(None))
+            print("idx:", idx, "dim_id:", dim_id, "sel:", sl)
             slices.append(sl)
             new_scales[dim_id] = self.scales[dim_id][sl]
         slices = tuple(slices)
@@ -186,6 +188,7 @@ class DataArray(object):
         
         for slices in itertools.product(*dim_slices):
             selector = {key: slice for key, slice in zip(dims, slices)}
+            print("selector", selector)
             yield self.isel(selector)
 
             

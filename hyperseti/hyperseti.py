@@ -27,6 +27,13 @@ import matplotlib.pyplot as plt
 from .log import logger_group, Logger
 from .plotting import imshow_dedopp, imshow_waterfall, overlay_hits
 
+# Parameters for turbo seti
+from turbo_seti import FindDoppler
+from turbo_seti.find_doppler.kernels._bitrev import bitrev
+MIN_SNR = 10.0 # TODO: what to set snr as?
+TESTDIR = os.path.split(os.path.abspath(__file__))[0]
+h5_filename = None
+
 logger = Logger('hyperseti.hyperseti')
 logger_group.add_logger(logger)
 
@@ -297,6 +304,148 @@ def dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
     else:
         return dedopp_gpu, metadata
 
+# TODO: delete this
+def turbo_dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
+              boxcar_mode='sum', return_space='cpu', kernel='dedoppler'):
+    """ Apply brute-force dedoppler kernel to data
+
+    Args:
+        data (np.array): Numpy array with shape (N_timestep, N_channel)
+        metadata (dict): Metadata dictionary, should contain 'df' and 'dt'
+                         (frequency and time resolution)
+        max_dd (float): Maximum doppler drift in Hz/s to search out to.
+        min_dd (float): Minimum doppler drift to search.
+        boxcar_mode (str): Boxcar mode to apply. mean/sum/gaussian.
+        return_space ('cpu' or 'gpu'): Returns array in CPU or GPU space
+
+    Returns:
+        dd_vals, dedopp_gpu (np.array, np/cp.array):
+    """
+    t0 = time.time()
+    if min_dd is None:
+        min_dd = np.abs(max_dd) * -1
+
+    # Compute minimum possible drift (delta_dd)
+    N_time, N_beam, N_chan = data.shape
+    if N_beam == 1:
+        data = data.squeeze()
+    else:
+        data = data[:, 0, :] # TODO ADD POL SUPPORT
+
+    obs_len  = N_time * metadata['dt'].to('s').value
+    delta_dd = metadata['df'].to('Hz').value / obs_len  # e.g. 2.79 Hz / 300 s = 0.0093 Hz/s
+
+    # Compute dedoppler shift schedules
+    N_dopp_upper   = int(max_dd / delta_dd)
+    N_dopp_lower   = int(min_dd / delta_dd)
+
+    if max_dd == 0 and min_dd is None:
+        dd_shifts = np.array([0], dtype='int32')
+    elif N_dopp_upper > N_dopp_lower:
+        dd_shifts      = np.arange(N_dopp_lower, N_dopp_upper + 1, dtype='int32')
+    else:
+        dd_shifts      = np.arange(N_dopp_upper, N_dopp_lower + 1, dtype='int32')[::-1]
+
+    dd_shifts_gpu  = cp.asarray(dd_shifts)
+    N_dopp = len(dd_shifts)
+
+    # Copy data over to GPU
+    d_gpu = cp.swapaxes(cp.asarray(data.astype('float32', copy=False)), 0, 1)
+
+    # Apply boxcar filter
+    if boxcar_size > 1:
+        d_gpu = apply_boxcar(d_gpu, boxcar_size, mode='sum', return_space='gpu')
+
+    # Allocate GPU memory for dedoppler data
+    dedopp_gpu_flipped = cp.flip(cp.copy(d_gpu), axis=1)
+    dedopp_gpu = cp.copy(d_gpu)
+    for i in range(N_chan):
+        assert(dedopp_gpu_flipped[i][0] == dedopp_gpu[i][-1])
+    t1 = time.time()
+    logger.info(f"Dedopp setup time: {(t1-t0)*1e3:2.2f}ms")
+
+    # Launch kernel
+    t0 = time.time()
+    flt(dedopp_gpu_flipped, N_time * N_chan, N_chan)
+    # dedopp_gpu_flipped = cp.roll(cp.flip(dedopp_gpu_flipped, axis=0), -N_time, axis=1)
+    dedopp_gpu_flipped = cp.flip(dedopp_gpu_flipped, axis=1)
+    last_row = cp.copy(dedopp_gpu_flipped[0])
+    count = 0
+    # for i in range(len(last_row)):
+    #     if last_row[i] == dedopp_gpu_flipped[0][i]:
+    #         print("HEHAHAHHA")
+    dedopp_gpu_flipped = dedopp_gpu_flipped[:-1]
+    
+    print(dedopp_gpu_flipped.shape)
+    flt(dedopp_gpu, N_time * N_chan, N_chan)
+
+    dedopp_gpu = cp.concatenate((dedopp_gpu_flipped, dedopp_gpu), axis=1)
+    dedopp_gpu = cp.swapaxes(dedopp_gpu, 0, 1)
+    t1 = time.time()
+    logger.info(f"Dedopp kernel time: {(t1-t0)*1e3:2.2f}ms")
+
+    metadata['drift_trials'] = np.arange(-N_time+1, N_time)
+    metadata['boxcar_size'] = boxcar_size
+    metadata['dd'] = delta_dd * u.Hz / u.s
+    return dedopp_gpu, metadata
+
+
+def flt(outbuf, mlen, nchn):
+    r"""
+    This is a function to Taylor-tree-sum a data stream. It assumes that
+    the arrangement of data stream is, all points in first spectra, all
+    points in second spectra, etc. Data are summed across time.
+ 
+    Parameters
+    ----------
+    outbuf : array_like
+        Input data array, replaced by dedispersed data at the output.
+    mlen : int
+        Dimension of outbuf[].
+    nchn : int
+        Number of frequency channels.
+    References
+    ----------
+    - R. Ramachandran, 07-Nov-97, nfra. -- Original algorithm.
+    - A. Siemion, 2011 -- float/64 bit addressing (C-code)
+    - H. Chen, 2014 -- python version
+    - E. Enriquez + P.Schellart, 2016 -- cython version
+    - L. Cruz, 2020 -- vectorized version
+    """
+    nsamp = (mlen/nchn) - (2*nchn)
+    npts = nsamp + nchn
+    nstages = int(np.log2(nchn))
+    ndat1 = nsamp + 2 * nchn
+    nmem = 1
+
+    for istages in range(0, nstages):
+        nmem  *= 2
+        nsec1  = nchn//nmem
+        nmem2  = nmem - 2
+        
+        for isec in range(0, nsec1):
+            ndelay = -1
+            koff = isec * nmem
+            for ipair in range(0, nmem2+1, 2):
+                ioff1 = int((bitrev(ipair, istages+1) + koff) * ndat1)
+                i2 = int((bitrev(ipair+1, istages+1) + koff) * ndat1)
+                ndelay += 1
+                ndelay2 = (ndelay + 1)
+                nfin = int(npts + ioff1)
+
+                l1 = (nfin - ioff1)
+                a = outbuf[ioff1:nfin]
+                b = outbuf[i2+ndelay:i2+ndelay+l1]
+                c = outbuf[i2+ndelay2:i2+ndelay2+l1]
+
+                outbuf[ioff1:nfin], outbuf[i2:i2+l1] = sum(a, b, c)
+
+
+@cp.fuse()
+def sum(a, b, c):
+    """
+    """
+    return a + b, a + c
 
 def spectral_kurtosis(data, metadata, boxcar_size=1, return_space='cpu'):
     """ Compute spectral kurtosis for zero-drift data """
@@ -518,9 +667,12 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
     boxcar_trials = map(int, 2**np.arange(0, n_boxcar))
     for boxcar_size in boxcar_trials:
         logger.info(f"--- Boxcar size: {boxcar_size} ---")
-        # Dedop
-        dedopp, metadata = dedoppler(data, metadata, boxcar_size=boxcar_size,  boxcar_mode='sum',
+        # Turbo seti dedop
+        dedopp, metadata = turbo_dedoppler(data, metadata, boxcar_size=boxcar_size,  boxcar_mode='sum',
                                      max_dd=max_dd, min_dd=min_dd, return_space='gpu')
+        # # Dedop
+        # dedopp, metadata = dedoppler(data, metadata, boxcar_size=boxcar_size,  boxcar_mode='sum',
+        #                              max_dd=max_dd, min_dd=min_dd, return_space='gpu')
 
         # Plotting
         logger.info("Plotting {}".format(boxcar_size))
@@ -570,6 +722,9 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
     t0 = time.time()
     #peaks = create_empty_hits_table()
     ds = from_h5(filename)
+    # Set h5_filename for turbo seti dedoppler
+    global h5_filename
+    h5_filename = filename
     search_count = 0
     out = []
     for d_arr in ds.isel({'frequency': slice(116048342, 116048342+gulp_size)}).iterate_through_data({'frequency': gulp_size}):
