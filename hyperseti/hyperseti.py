@@ -350,7 +350,8 @@ def turbo_dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
     N_dopp = len(dd_shifts)
 
     # Copy data over to GPU
-    d_gpu = cp.swapaxes(cp.asarray(data.astype('float32', copy=False)), 0, 1)
+    d_gpu = cp.asarray(data.astype('float32', copy=False))
+    # d_gpu = cp.swapaxes(cp.asarray(data.astype('float32', copy=False)), 0, 1).flatten()
 
     # Apply boxcar filter
     if boxcar_size > 1:
@@ -359,28 +360,28 @@ def turbo_dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
     # Allocate GPU memory for dedoppler data
     dedopp_gpu_flipped = cp.flip(cp.copy(d_gpu), axis=1)
     dedopp_gpu = cp.copy(d_gpu)
-    for i in range(N_chan):
-        assert(dedopp_gpu_flipped[i][0] == dedopp_gpu[i][-1])
     t1 = time.time()
     logger.info(f"Dedopp setup time: {(t1-t0)*1e3:2.2f}ms")
 
     # Launch kernel
     t0 = time.time()
+    print(dedopp_gpu_flipped.shape)
     flt(dedopp_gpu_flipped, N_time * N_chan, N_chan)
     # dedopp_gpu_flipped = cp.roll(cp.flip(dedopp_gpu_flipped, axis=0), -N_time, axis=1)
     dedopp_gpu_flipped = cp.flip(dedopp_gpu_flipped, axis=1)
     last_row = cp.copy(dedopp_gpu_flipped[0])
     count = 0
-    # for i in range(len(last_row)):
-    #     if last_row[i] == dedopp_gpu_flipped[0][i]:
-    #         print("HEHAHAHHA")
+    for i in range(len(last_row)):
+        if last_row[i] == dedopp_gpu_flipped[0][i]:
+            count += 1
+    print(count)
     dedopp_gpu_flipped = dedopp_gpu_flipped[:-1]
     
     print(dedopp_gpu_flipped.shape)
     flt(dedopp_gpu, N_time * N_chan, N_chan)
 
-    dedopp_gpu = cp.concatenate((dedopp_gpu_flipped, dedopp_gpu), axis=1)
-    dedopp_gpu = cp.swapaxes(dedopp_gpu, 0, 1)
+    dedopp_gpu = cp.concatenate((dedopp_gpu_flipped, dedopp_gpu), axis=0)
+    # dedopp_gpu = cp.swapaxes(dedopp_gpu, 0, 1)
     t1 = time.time()
     logger.info(f"Dedopp kernel time: {(t1-t0)*1e3:2.2f}ms")
 
@@ -437,7 +438,6 @@ def flt(outbuf, mlen, nchn):
                 a = outbuf[ioff1:nfin]
                 b = outbuf[i2+ndelay:i2+ndelay+l1]
                 c = outbuf[i2+ndelay2:i2+ndelay2+l1]
-
                 outbuf[ioff1:nfin], outbuf[i2:i2+l1] = sum(a, b, c)
 
 
