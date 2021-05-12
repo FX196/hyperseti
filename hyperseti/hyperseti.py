@@ -235,8 +235,12 @@ def apply_boxcar(data, boxcar_size, axis=1, mode='mean', return_space='cpu'):
     t0 = time.time()
     # Move to GPU as required, and multiply by sqrt(boxcar_size)
     # This keeps stdev noise the same instead of decreasing by sqrt(N)
-    data = cp.asarray(data.astype('float32', copy=False))
+    # Move to GPU only if data is not cp
+    if not isinstance(data, cp.core.core.ndarray):
+        data = cp.asarray(data.astype('float32', copy=False))
+    t2 = time.time()
     data = uniform_filter1d(data, size=boxcar_size, axis=axis)
+    t3 = time.time()
     if mode == 'gaussian':
         data *= np.sqrt(boxcar_size)
     elif mode == 'sum':
@@ -295,11 +299,14 @@ def dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
     N_dopp = len(dd_shifts)
 
     # Copy data over to GPU
-    d_gpu = cp.asarray(data.astype('float32', copy=False))
+    d_gpu = cp.asarray(data)
 
     # Apply boxcar filter
+    t2 = time.time()
     if boxcar_size > 1:
         d_gpu = apply_boxcar(d_gpu, boxcar_size, mode='sum', return_space='gpu')
+    t3 = time.time()
+    logger.info(f"Dedopp box car filter time: {(t3 - t2)*1e3:2.2f}ms")
 
     # Allocate GPU memory for dedoppler data
     dedopp_gpu = cp.zeros((N_dopp, N_chan), dtype=cp.float32)
@@ -585,7 +592,7 @@ def merge_hits_cpu(hitlist, domain_shape=None):
 
 merge_hits = merge_hits_gpu
 
-def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistance=None,
+def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance=None,
                  min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False, plot=True):
     """ Run dedoppler + hitsearch pipeline
 
@@ -628,6 +635,7 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
 
         # Plotting original + dedop
         if plot:
+            t0_plot = time.time()
             logger.info("Plotting {}".format(boxcar_size))
             plt.figure(figsize=(20, 4))
             plt.subplot(1,2,1)
@@ -644,6 +652,8 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
         if plot:
             overlay_hits(_peaks, 'channel', 'driftrate')
             plt.savefig(f'boxcar: {boxcar_size}.png')
+            t1_plot = time.time()
+            logger.info(f"Plotting time: {(t1_plot - t0_plot)*1e3:2.2f}ms")
 
         if _peaks is not None:
             _peaks['snr'] /= np.sqrt(N_timesteps * boxcar_size)
@@ -704,4 +714,4 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
     dframe.to_csv(filename_out)
     t1 = time.time()
     print(f"## TOTAL TIME: {(t1-t0):2.2f}s ##\n\n")
-    return dframe
+    # return dframe
