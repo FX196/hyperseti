@@ -51,6 +51,9 @@ prominent_peaks_kernel = cp.RawKernel(r'''
                 }
             }
 
+            if (intensity_max < threshold)
+                return;
+
             // Check if local maximum is a peak
             int is_peak = 1;
             for (int y = max(0, y_max - min_ydistance); y < min(M, y_max + min_ydistance + 1); ++y) {
