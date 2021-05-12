@@ -69,8 +69,8 @@ extern "C" __global__
             if (idx < F * T && idx > 0) {
                 dd_val += data[idx];
               }
-              dedopp[dd_idx] = dd_val;
             }
+            dedopp[dd_idx] = dd_val;
         }
 ''', 'dedopplerKernel')
 
