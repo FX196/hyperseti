@@ -4,6 +4,7 @@ import time
 import pandas as pd
 import logging
 import os
+import multiprocessing as mp
 
 from astropy import units as u
 import setigen as stg
@@ -681,7 +682,6 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance
 
 
 def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1, ngulps=0, freq_start=0, *args, **kwargs):
-    import multiprocessing as mp
     """ Find ET, serial version
 
     Wrapper for reading from a file and running run_pipeline() on all subbands within the file.
@@ -706,21 +706,10 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
     manager = mp.Manager()
     return_dict = manager.dict()
     procs = []
-    i = 0
-    while i < int(ngulps)//16*16:
-        for j in range(16):
-            p = mp.Process(target=proc_run_pipeline, args=(i*16+j, ds, return_dict, gulp_size, max_dd, ngulps, freq_start, *args), kwargs=kwargs)
-            procs.append(p)
-            p.start()
-            i += 1
-        for p in procs:
-            p.join()
-        procs = []
-    while i < ngulps:
-        p = mp.Process(target=proc_run_pipeline, args=(i, ds, return_dict, gulp_size, max_dd, ngulps, freq_start, *args), kwargs=kwargs)
-        procs.append(p)
-        p.start()
-        i += 1
+    nranks = 16
+    nranks_per_gpu = 4
+    for i in range(ngulps):
+        procs.extend(pipeline_helper(i, nranks, nranks_per_gpu, ds, return_dict, gulp_size, max_dd, ngulps, freq_start, *args, **kwargs))
     for p in procs:
         p.join()
     dframe = pd.concat(return_dict.values())
@@ -729,8 +718,16 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
     print(f"## TOTAL TIME: {(t1-t0):2.2f}s ##\n\n")
     # return dframe
 
+def pipeline_helper(rank, nranks, nranks_per_gpu, ds, return_dict, gulp_size=2**19, max_dd=1, ngulps=0, freq_start=0, *args, **kwargs):
+    cuda_device = (rank % nranks) // nranks_per_gpu
+    procs = []
+    for i in range(rank, ngulps, nranks):
+        p = mp.Process(target=proc_run_pipeline, args=(i, ds, return_dict, cuda_device, gulp_size, max_dd, ngulps, freq_start, *args), kwargs=kwargs)
+        procs.append(p)
+        p.start()
+    return procs
 
-def proc_run_pipeline(i, ds, return_dict, gulp_size=2**19, max_dd=1, ngulps=0, freq_start=0, *args, **kwargs):
+def proc_run_pipeline(i, ds, return_dict, cuda_device, gulp_size=2**19, max_dd=1, ngulps=0, freq_start=0, *args, **kwargs):
     d_arr = ds.isel({'frequency': slice(freq_start + gulp_size * i, freq_start + gulp_size * (i + 1))})
     d = d_arr.data
     # Check if we ran out of data
@@ -740,6 +737,6 @@ def proc_run_pipeline(i, ds, return_dict, gulp_size=2**19, max_dd=1, ngulps=0, f
     f = d_arr.frequency
     t = d_arr.time
     md = {'fch1': f.val_start * f.units, 'df': f.val_step * f.units, 'dt': t.val_step * t.units}
-    with cp.cuda.Device((i % 16)//4):
+    with cp.cuda.Device(cuda_device):
         dedopp, metadata, hits = run_pipeline(d, md, max_dd, *args, **kwargs)
     return_dict[i] = hits
