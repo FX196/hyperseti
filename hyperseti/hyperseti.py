@@ -36,6 +36,8 @@ logger_group.add_logger(logger)
 # Max threads setup
 os.environ['NUMEXPR_MAX_THREADS'] = '8'
 
+def print_time(msg, t0):
+    print(f'## {msg}: {(time.time() - t0)*1e3:2.2f}ms ##')
 
 dedoppler_kernel = cp.RawKernel(r'''
 extern "C" __global__
@@ -120,18 +122,18 @@ suppression_kernel = cp.RawKernel(r'''
 extern "C" __global__
     __global__ void suppressionKernel
         (const float* snrs, const int* drifts, const int* channels, const int* sizes, const int* start, const int* end, bool* save, float* debug)
-        /* 
+        /*
         */
         {
-        
+
         // Setup thread index
         const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-        
-        
+
+
         const int start_idx = start[tid];
         const int end_idx = end[tid];
-        
-        
+
+
         for(int idx = start_idx; idx < end_idx; idx++){
             if(save[idx]){
                 int boxcar_size = sizes[idx];
@@ -141,7 +143,7 @@ extern "C" __global__
                 int max_drift = drifts[idx] + boxcar_size + 1;
                 float snr = snrs[idx];
                 debug[idx] = snrs[idx];
-                
+
                 int curr_idx = idx+1;
                 while(curr_idx < end_idx && channels[curr_idx] <= end_channel){
                     if((drifts[curr_idx] >= min_drift) && (drifts[curr_idx] <= max_drift) && (snrs[curr_idx] < snr)){
@@ -159,7 +161,7 @@ extern "C" __global__
             }
         }
         }
-        
+
 ''', 'suppressionKernel')
 
 
@@ -235,12 +237,8 @@ def apply_boxcar(data, boxcar_size, axis=1, mode='mean', return_space='cpu'):
     t0 = time.time()
     # Move to GPU as required, and multiply by sqrt(boxcar_size)
     # This keeps stdev noise the same instead of decreasing by sqrt(N)
-    # Move to GPU only if data is not cp
-    if not isinstance(data, cp.core.core.ndarray):
-        data = cp.asarray(data.astype('float32', copy=False))
-    t2 = time.time()
+    data = cp.asarray(data.astype('float32', copy=False))
     data = uniform_filter1d(data, size=boxcar_size, axis=axis)
-    t3 = time.time()
     if mode == 'gaussian':
         data *= np.sqrt(boxcar_size)
     elif mode == 'sum':
@@ -271,6 +269,7 @@ def dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
         dd_vals, dedopp_gpu (np.array, np/cp.array):
     """
     t0 = time.time()
+    t0_shift_schedules = t0
     if min_dd is None:
         min_dd = np.abs(max_dd) * -1
 
@@ -294,19 +293,23 @@ def dedoppler(data, metadata, max_dd, min_dd=None, boxcar_size=1,
         dd_shifts      = np.arange(N_dopp_lower, N_dopp_upper + 1, dtype='int32')
     else:
         dd_shifts      = np.arange(N_dopp_upper, N_dopp_lower + 1, dtype='int32')[::-1]
+    print_time('Pipeline: dedopp: compute shift schedules', t0_shift_schedules)
 
+    t0_dd_shifts = time.time()
     dd_shifts_gpu  = cp.asarray(dd_shifts)
     N_dopp = len(dd_shifts)
+    print_time('Pipeline: dedopp: transfer dd_shifts', t0_dd_shifts)
 
     # Copy data over to GPU
-    d_gpu = cp.asarray(data)
+    t0_io = time.time()
+    d_gpu = cp.asarray(data.astype('float32', copy=False))
+    print_time('Pipeline: dedopp: gpu transfer', t0_io)
 
     # Apply boxcar filter
-    t2 = time.time()
+    t0_boxcar = time.time()
     if boxcar_size > 1:
         d_gpu = apply_boxcar(d_gpu, boxcar_size, mode='sum', return_space='gpu')
-    t3 = time.time()
-    logger.info(f"Dedopp box car filter time: {(t3 - t2)*1e3:2.2f}ms")
+    print_time('Pipeline: dedopp: boxcar', t0_boxcar)
 
     # Allocate GPU memory for dedoppler data
     dedopp_gpu = cp.zeros((N_dopp, N_chan), dtype=cp.float32)
@@ -429,7 +432,7 @@ def create_empty_hits_table():
     return hits
 
 
-def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=None):
+def hitsearch(dedopp, metadata, threshold=0, min_fdistance=None, min_ddistance=None):
     """ Search for hits using _prominent_peaks method in cupyimg.skimage
 
     Args:
@@ -497,7 +500,7 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
         logger.info(f"Peak find to dataframe: {(t1-t0)*1e3:2.2f}ms")
     else:
         return None
-    
+
 # def populate_domain(hitlist, domain_shape=None):
 #     hitlist = hitlist.sort_values("driftrate_idx", ascending=True)
 #     split_arr = hitlist["channel_idx"]
@@ -505,31 +508,31 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
 #     x = np.expand_dims(np.array(split_arr), axis=1)
 #     inds = ((x > splitter-32) * (x < (splitter + (2**8)+32)))
 #     sub_lists = [hitlist[sub_inds] for sub_inds in inds.T]
-    
+
 #     snr_gpu = cp.zeros(domain_shape, cp.float32)
 #     size_gpu = cp.zeros(domain_shape, cp.int8)
-    
+
 #     for row in hitlist:
-        
-        
-    
+
+
+
 def merge_hits_gpu(hitlist, domain_shape):
     n_drift, n_chan = domain_shape
     F_block = min(n_chan, 2**8)
     n_threads = n_chan // F_block
-    
-    
+
+
     hitlist = hitlist.sort_values("channel_idx", ascending=True)
     split_arr = hitlist["channel_idx"]
     splitter = np.expand_dims(np.arange(n_threads) * F_block, axis=0)
     x = np.expand_dims(np.array(split_arr), axis=1)
     inds = ((x > splitter - 64) * (x < (splitter + F_block + 64)))
     selector = (((np.repeat(np.expand_dims(np.arange(len(hitlist)), axis=1), n_threads, axis=1))) * inds)
-    
+
     ends = np.argmax(selector, axis=0)+1
     selector[inds != True] += len(hitlist)
     starts = np.argmin(selector, axis=0)
-    
+
     snrs = cp.array(hitlist["snr"], dtype=cp.float32)
     drifts = cp.array(hitlist["driftrate_idx"], dtype=cp.int32)
     channels = cp.array(hitlist["channel_idx"], dtype=cp.int32)
@@ -538,17 +541,17 @@ def merge_hits_gpu(hitlist, domain_shape):
     ends = cp.array(ends, dtype=cp.int32)
     save = cp.full((len(hitlist),), True, dtype=cp.bool)
     debug = cp.zeros(len(hitlist), dtype=cp.float32)
-    
+
     NUM_BLOCKS = (1,)
     THREADS_PER_BLOCK = (n_threads,)
-    
+
     suppression_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
-    
+
     return hitlist[save.get()]
-    
-    
+
+
 def merge_hits_orig(hitlist, domain_shape=None):
-    """ Group hits corresponding to different boxcar widths and return hit with max SNR 
+    """ Group hits corresponding to different boxcar widths and return hit with max SNR
     Args:
         hitlist (pd.DataFrame): List of hits
 
@@ -575,13 +578,13 @@ def merge_hits_orig(hitlist, domain_shape=None):
         hits.append(p0)
 
     return pd.DataFrame(hits)
-    
-    
+
+
 def merge_hits_cpu(hitlist, domain_shape=None):
     NUM_CORES = 32
     block_size = int(domain_shape[1] / NUM_CORES)
     split_arr = hitlist["channel_idx"]
-    
+
     splitter = np.expand_dims(np.arange(NUM_CORES) * block_size, axis=0)
     x = np.expand_dims(np.array(split_arr), axis=1)
     inds = ((x > splitter - 64) * (x < (splitter + block_size + 32)))
@@ -593,7 +596,7 @@ def merge_hits_cpu(hitlist, domain_shape=None):
 merge_hits = merge_hits_gpu
 
 def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance=None,
-                 min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False, plot=True):
+                 min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False, plot=False):
     """ Run dedoppler + hitsearch pipeline
 
     Args:
@@ -622,7 +625,9 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance
 
     # Apply preprocessing normalization
     if apply_normalization:
+        t_normalize_start = time.time()
         data = normalize(data, return_space='gpu')
+        print_time('Pipeline: Total normalization time', t_normalize_start)
 
 
     peaks = create_empty_hits_table()
@@ -630,8 +635,10 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance
     boxcar_trials = map(int, 2**np.arange(0, n_boxcar))
     for boxcar_size in boxcar_trials:
         logger.info(f"--- Boxcar size: {boxcar_size} ---")
+        t0_dedop = time.time()
         dedopp, metadata = dedoppler(data, metadata, boxcar_size=boxcar_size,  boxcar_mode='sum',
                                      max_dd=max_dd, min_dd=min_dd, return_space='gpu')
+        print_time('Pipeline: dedop', t0_dedop)
 
         # Plotting original + dedop
         if plot:
@@ -642,18 +649,21 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance
             imshow_waterfall(data[:,0,:], metadata, 'channel', 'timestep')
             plt.subplot(1,2,2)
             imshow_dedopp(dedopp, metadata, 'channel', 'driftrate')
+            print_time('Pipeline: plotting pt1', t0_plot)
 
         # Adjust SNR threshold to take into account boxcar size and dedoppler sum
         # Noise increases by sqrt(N_timesteps * boxcar_size)
+        t0_hitsearch = time.time()
         _threshold = threshold * np.sqrt(N_timesteps * boxcar_size)
         _peaks = hitsearch(dedopp, metadata, threshold=_threshold, min_fdistance=min_fdistance, min_ddistance=min_ddistance)
+        print_time('Pipeline: hitsearch', t0_hitsearch)
 
         # Plotting hits
         if plot:
+            t0_plot = time.time()
             overlay_hits(_peaks, 'channel', 'driftrate')
             plt.savefig(f'boxcar: {boxcar_size}.png')
-            t1_plot = time.time()
-            logger.info(f"Plotting time: {(t1_plot - t0_plot)*1e3:2.2f}ms")
+            print_time('Pipeline: plotting pt2', t0_plot)
 
         if _peaks is not None:
             _peaks['snr'] /= np.sqrt(N_timesteps * boxcar_size)
@@ -691,14 +701,21 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
     t0 = time.time()
     ds = from_h5(filename)
     out = []
-    
+    print_time('Initial IO Time', t0)
+
     i = 0
     while True:
         # Check if we processed enough number of gulps
+        t_io_start = time.time()
+
         if ngulps != 0 and i >= ngulps:
             break
         d_arr = ds.isel({'frequency': slice(freq_start + gulp_size * i, freq_start + gulp_size * (i + 1))})
         d = d_arr.data
+
+        print_time('IO time', t_io_start)
+        t_pipeline_start = time.time()
+
         # Check if we ran out of data
         if np.sum(d.shape) == 0:
             break
@@ -710,8 +727,9 @@ def find_et_serial(filename, filename_out='hits.csv', gulp_size=2**19, max_dd=1,
         out.append(hits)
         logger.info(f"{len(hits)} hits found")
 
+        print_time('Pipeline time', t_pipeline_start)
+
     dframe = pd.concat(out)
     dframe.to_csv(filename_out)
-    t1 = time.time()
-    print(f"## TOTAL TIME: {(t1-t0):2.2f}s ##\n\n")
-    # return dframe
+    print_time('TOTAL TIME', t0)
+    return dframe
