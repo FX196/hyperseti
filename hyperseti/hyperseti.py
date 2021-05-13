@@ -519,22 +519,26 @@ def hitsearch(dedopp, metadata, threshold=0, min_fdistance=None, min_ddistance=N
 
 
 def merge_hits_gpu(hitlist, domain_shape):
+    if len(hitlist) < 128:
+        return merge_hits_orig(hitlist)
+    
     n_drift, n_chan = domain_shape
-    F_block = min(n_chan, 2**8)
-    n_threads = n_chan // F_block
-
-
+    F_thread = min(n_chan, 2**8)
+    n_threads = n_chan // F_thread
+    n_blocks = 32
+    
+    
     hitlist = hitlist.sort_values("channel_idx", ascending=True)
     split_arr = hitlist["channel_idx"]
-    splitter = np.expand_dims(np.arange(n_threads) * F_block, axis=0)
+    splitter = np.expand_dims(np.arange(n_threads) * F_thread, axis=0)
     x = np.expand_dims(np.array(split_arr), axis=1)
-    inds = ((x > splitter - 64) * (x < (splitter + F_block + 64)))
+    inds = ((x > splitter - 64) * (x < (splitter + F_thread + 64)))
     selector = (((np.repeat(np.expand_dims(np.arange(len(hitlist)), axis=1), n_threads, axis=1))) * inds)
-
+    
     ends = np.argmax(selector, axis=0)+1
     selector[inds != True] += len(hitlist)
     starts = np.argmin(selector, axis=0)
-
+    
     snrs = cp.array(hitlist["snr"], dtype=cp.float32)
     drifts = cp.array(hitlist["driftrate_idx"], dtype=cp.int32)
     channels = cp.array(hitlist["channel_idx"], dtype=cp.int32)
@@ -543,12 +547,16 @@ def merge_hits_gpu(hitlist, domain_shape):
     ends = cp.array(ends, dtype=cp.int32)
     save = cp.full((len(hitlist),), True, dtype=cp.bool)
     debug = cp.zeros(len(hitlist), dtype=cp.float32)
-
-    NUM_BLOCKS = (1,)
-    THREADS_PER_BLOCK = (n_threads,)
-
+    
+    NUM_BLOCKS = (n_blocks,)
+    THREADS_PER_BLOCK = (n_threads // n_blocks,)
+    
+#     print(NUM_BLOCKS, THREADS_PER_BLOCK)
+    
+#     print(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
+    
     suppression_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
-
+    
     return hitlist[save.get()]
 
 
