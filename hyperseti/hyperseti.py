@@ -507,16 +507,20 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
         
     
 def merge_hits_gpu(hitlist, domain_shape):
+    if len(hitlist) < 128:
+        return merge_hits_orig(hitlist)
+    
     n_drift, n_chan = domain_shape
-    F_block = min(n_chan, 2**8)
-    n_threads = n_chan // F_block
+    F_thread = min(n_chan, 2**8)
+    n_threads = n_chan // F_thread
+    n_blocks = 16
     
     
     hitlist = hitlist.sort_values("channel_idx", ascending=True)
     split_arr = hitlist["channel_idx"]
-    splitter = np.expand_dims(np.arange(n_threads) * F_block, axis=0)
+    splitter = np.expand_dims(np.arange(n_threads) * F_thread, axis=0)
     x = np.expand_dims(np.array(split_arr), axis=1)
-    inds = ((x > splitter - 64) * (x < (splitter + F_block + 64)))
+    inds = ((x > splitter - 64) * (x < (splitter + F_thread + 64)))
     selector = (((np.repeat(np.expand_dims(np.arange(len(hitlist)), axis=1), n_threads, axis=1))) * inds)
     
     ends = np.argmax(selector, axis=0)+1
@@ -532,8 +536,10 @@ def merge_hits_gpu(hitlist, domain_shape):
     save = cp.full((len(hitlist),), True, dtype=cp.bool)
     debug = cp.zeros(len(hitlist), dtype=cp.float32)
     
-    NUM_BLOCKS = (1,)
-    THREADS_PER_BLOCK = (n_threads,)
+    NUM_BLOCKS = (n_blocks,)
+    THREADS_PER_BLOCK = (n_threads // n_blocks,)
+    
+#     print(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
     
     suppression_kernel(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
     
@@ -571,6 +577,8 @@ def merge_hits_orig(hitlist, domain_shape=None):
     
     
 def merge_hits_cpu(hitlist, domain_shape=None):
+    if len(hitlist) < 256:
+        return merge_hits_orig(hitlist)
     NUM_CORES = 32
     block_size = int(domain_shape[1] / NUM_CORES)
     split_arr = hitlist["channel_idx"]
@@ -638,6 +646,7 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistanc
         # Adjust SNR threshold to take into account boxcar size and dedoppler sum
         # Noise increases by sqrt(N_timesteps * boxcar_size)
         _threshold = threshold * np.sqrt(N_timesteps * boxcar_size)
+#         print(f"Doing hitsearch with threshold {_threshold}, boxcar {boxcar_size}, data stats: max {cp.max(dedopp)}")
         _peaks = hitsearch(dedopp, metadata, threshold=_threshold, min_fdistance=min_fdistance, min_ddistance=min_ddistance)
 
         # Plotting hits
