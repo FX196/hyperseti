@@ -432,7 +432,7 @@ def create_empty_hits_table():
     return hits
 
 
-def hitsearch(dedopp, metadata, threshold=0, min_fdistance=None, min_ddistance=None):
+def hitsearch(dedopp, metadata, threshold=1, min_fdistance=None, min_ddistance=None):
     """ Search for hits using _prominent_peaks method in cupyimg.skimage
 
     Args:
@@ -674,6 +674,7 @@ def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=1, min_fdistance
         peaks = merge_hits(peaks, domain_shape=dedopp.shape)
         t1_merge = time.time()
         logger.info(f"Hit merging time: {(t1_merge-t0_merge)*1e3:2.2f}ms")
+        print_time('Pipeline: merge hits', t0_merge)
     t1 = time.time()
 
     logger.info(f"Pipeline runtime: {(t1-t0):2.2f}s")
