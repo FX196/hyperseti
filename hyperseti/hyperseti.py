@@ -549,7 +549,7 @@ def merge_hits_gpu(hitlist, domain_shape):
     NUM_BLOCKS = (n_blocks,)
     THREADS_PER_BLOCK = (n_threads // n_blocks,)
     
-    print(NUM_BLOCKS, THREADS_PER_BLOCK)
+#     print(NUM_BLOCKS, THREADS_PER_BLOCK)
     
 #     print(NUM_BLOCKS, THREADS_PER_BLOCK, (snrs, drifts, channels, sizes, starts, ends, save, debug))
     
