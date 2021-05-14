@@ -2,16 +2,16 @@ import matplotlib.pyplot as plt
 import re
 import numpy as np
 
-weak_scale = True
+weak_scale = False
 strong_scale_fix_cpu = False
-strong_scale_fix_gpu = False
+strong_scale_fix_gpu = True
 
 if weak_scale:
     filename = "weak_scale"
 elif strong_scale_fix_cpu:
     filename = "strong_scale_fix_cpu"
 else:
-    filename = "strong_scale_fix_gpu"
+    filename = "data/strong_scale_fix_gpu"
 
 with open(filename, "r") as f:
     results = f.read().split("\n")
