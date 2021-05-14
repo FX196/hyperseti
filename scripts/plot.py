@@ -7,11 +7,11 @@ strong_scale_fix_cpu = False
 strong_scale_fix_gpu = False
 
 if weak_scale:
-    filename = "data/weak_scale"
+    filename = "weak_scale"
 elif strong_scale_fix_cpu:
-    filename = "data/strong_scale_fix_cpu"
+    filename = "strong_scale_fix_cpu"
 else:
-    filename = "data/strong_scale_fix_gpu"
+    filename = "strong_scale_fix_gpu"
 
 with open(filename, "r") as f:
     results = f.read().split("\n")
@@ -48,23 +48,25 @@ if weak_scale:
     times = list(time_map.values()) 
     ax = plt.subplot() 
     ax.set_xticks(nranks)
-    ticklabels = [f'{rank} CPU(s)/{rank//4} GPU(s)' for rank in nranks]
+    ticklabels = [f'{rank} CPU(s)/{rank//8} GPU(s)' for rank in nranks]
     ax.set_xticklabels(ticklabels)
     print(nranks)
     
     ax.plot(nranks, times, color='black', marker='o')
     ax.set_xlabel("Number of GPUs/CPUs used")
-    ax.set_ylabel("Total runtime excluding first run")
-    ax.set_ylim((0, 6))
+    ax.set_ylabel("Total runtime excluding first run (s)")
+    ax.set_ylim((0, 30))
     plt.savefig("weak_scale.png")
 elif strong_scale_fix_cpu:
     gpus = list(time_map.keys())
     times = list(time_map.values()) 
     ax = plt.subplot()
     ax.plot(gpus, times, color='black', marker='o')
-    ax.set_ylim((0, 6))
+    # ax.set_ylim((0, 80))
+    ax.set_xscale('log')
+    ax.set_yscale('log')
     ax.set_xlabel("Number of GPUs used")
-    ax.set_ylabel("Total runtime excluding first run")
+    ax.set_ylabel("Total runtime excluding first run (s)")
     plt.savefig("fix_cpu_strong_scale.png")
 else:
     nranks = list(time_map.keys())
@@ -72,7 +74,9 @@ else:
     ax = plt.subplot()
     ax.plot(nranks, times, color='black', marker='o')
     ax.set_xlabel("Number of CPUs used")
-    ax.set_ylabel("Total runtime excluding first run")
+    ax.set_ylabel("Total runtime excluding first run (s)")
+    ax.set_xscale('log')
+    ax.set_yscale('log')
     plt.savefig("fix_gpu_strong_scale.png")
 # nranks = list(time_map.keys())
 # times = list(time_map.values())  
