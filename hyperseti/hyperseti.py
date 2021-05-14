@@ -406,7 +406,7 @@ def hitsearch(dedopp, metadata, threshold=10, min_fdistance=None, min_ddistance=
     dedopp_gpu = cp.asarray(dedopp.astype('float32', copy=False))
 
     t0 = time.time()
-    intensity, fcoords, dcoords = prominent_peaks_optimized(dedopp_gpu, min_xdistance=min_fdistance, min_ydistance=min_ddistance, threshold=threshold)
+    intensity, fcoords, dcoords = prominent_peaks(dedopp_gpu, min_xdistance=min_fdistance, min_ydistance=min_ddistance, threshold=threshold)
     logger.debug("# of intensities:{}".format(len(intensity)))
 
     t1 = time.time()
@@ -479,7 +479,7 @@ def merge_hits(hitlist):
 
 
 def run_pipeline(data, metadata, max_dd, min_dd=None, threshold=50, min_fdistance=None,
-                 min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False, plot=True):
+                 min_ddistance=None, n_boxcar=6, merge_boxcar_trials=True, apply_normalization=False, plot=False):
     """ Run dedoppler + hitsearch pipeline
 
     Args:
